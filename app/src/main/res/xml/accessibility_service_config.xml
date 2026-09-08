@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    canPerformGestures="true"            -> required to call dispatchGesture() for the synthetic click.
+    canRequestFingerprintGestures="true" -> required to receive FingerprintGestureController callbacks.
+    canRetrieveWindowContent="false"     -> we never inspect screen content, only dispatch a tap,
+                                             so we deliberately do NOT request this — least privilege.
+    accessibilityEventTypes="typeWindowStateChanged" is the minimum non-empty event mask; we don't
+    actually act on these events (see onAccessibilityEvent in the service), but the service still
+    needs at least one declared event type to bind correctly on all OS versions.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canPerformGestures="true"
+    android:canRequestFingerprintGestures="true"
+    android:canRetrieveWindowContent="false"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="100" />

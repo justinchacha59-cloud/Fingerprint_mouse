@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Classic arrow-pointer shape. The tip of the arrow is at the vector's
+    origin (top-left of its own bounds), which is why FingerprintMouseService
+    offsets the overlay by half the view's width/height when positioning it —
+    see updateCursorPosition()'s comment for the full explanation.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="40dp"
+    android:height="40dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFF"
+        android:strokeColor="#2962FF"
+        android:strokeWidth="1.2"
+        android:pathData="M3,2 L3,19.5 L7.2,15.8 L9.8,21.5 L12.4,20.3 L9.7,14.6 L15.5,14.6 Z" />
+</vector>

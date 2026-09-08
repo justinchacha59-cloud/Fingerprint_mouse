@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        We do NOT declare android.permission.USE_FINGERPRINT / USE_BIOMETRIC.
+        Those govern *authentication* (verifying identity). This app never
+        authenticates anyone — it only listens for raw swipe gestures on the
+        sensor via the AccessibilityService FingerprintGestureController,
+        which is gated purely by the user manually enabling this Accessibility
+        Service in system settings (a stronger, explicit consent step).
+
+        We also do NOT declare SYSTEM_ALERT_WINDOW. The cursor overlay is
+        drawn using WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+        a special window type that any bound AccessibilityService is already
+        permitted to use without the general "draw over other apps" permission.
+    -->
+    <uses-feature
+        android:name="android.hardware.fingerprint"
+        android:required="false" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Material3.DayNight.NoActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" is what
+            actually restricts this service: only the system (via the Accessibility
+            settings screen) is allowed to bind to it. exported="true" is required
+            alongside that permission so the system can bind to it at all.
+        -->
+        <service
+            android:name=".FingerprintMouseService"
+            android:exported="true"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+    </application>
+</manifest>

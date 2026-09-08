@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Fingerprint Mouse</string>
+    <string name="accessibility_service_label">Fingerprint Mouse Control</string>
+    <string name="accessibility_service_description">Lets you move an on-screen pointer and tap by swiping on the fingerprint sensor, and draws the pointer as a small overlay icon.</string>
+
+    <string name="main_description">Turn on the switch below, then enable "Fingerprint Mouse Control" on the Accessibility Settings screen that opens. Once enabled, swipe up, down, left, or right on your fingerprint sensor to move the pointer. Swipe the same direction twice quickly to click.</string>
+    <string name="switch_label">Enable fingerprint mouse control</string>
+    <string name="status_enabled">Status: service is enabled</string>
+    <string name="status_disabled">Status: service is not enabled</string>
+    <string name="toast_find_service">Find \"Fingerprint Mouse Control\" in the list and turn it on</string>
+</resources>
