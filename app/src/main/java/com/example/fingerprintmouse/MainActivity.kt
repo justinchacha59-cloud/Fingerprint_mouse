@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
 import android.text.TextUtils
+import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -21,6 +22,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var serviceSwitch: MaterialSwitch
     private lateinit var statusText: TextView
+    private lateinit var modeRadioGroup: RadioGroup
+    private lateinit var modeHintText: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -28,6 +31,8 @@ class MainActivity : AppCompatActivity() {
 
         serviceSwitch = findViewById(R.id.switchService)
         statusText = findViewById(R.id.textStatus)
+        modeRadioGroup = findViewById(R.id.radioGroupMode)
+        modeHintText = findViewById(R.id.textModeHint)
     }
 
     override fun onResume() {
@@ -36,6 +41,7 @@ class MainActivity : AppCompatActivity() {
         // Settings screen, which we navigate away to — so re-check on every
         // return to this screen rather than trusting the switch's last state.
         refreshStatusFromSystem()
+        refreshModeFromPrefs()
     }
 
     private fun refreshStatusFromSystem() {
@@ -52,6 +58,29 @@ class MainActivity : AppCompatActivity() {
         }
 
         statusText.text = getString(if (enabled) R.string.status_enabled else R.string.status_disabled)
+    }
+
+    /** Reads the saved control mode and reflects it in the radio buttons + hint text. */
+    private fun refreshModeFromPrefs() {
+        val mode = ControlModePrefs.getMode(this)
+
+        // Same defensive pattern as the service switch above: set state first,
+        // attach the listener after, so restoring state never fires a write.
+        modeRadioGroup.setOnCheckedChangeListener(null)
+        modeRadioGroup.check(if (mode == ControlMode.TILT) R.id.radioTilt else R.id.radioFingerprint)
+        modeRadioGroup.setOnCheckedChangeListener { _, checkedId ->
+            val newMode = if (checkedId == R.id.radioTilt) ControlMode.TILT else ControlMode.FINGERPRINT
+            ControlModePrefs.setMode(this, newMode)
+            updateModeHint(newMode)
+        }
+
+        updateModeHint(mode)
+    }
+
+    private fun updateModeHint(mode: ControlMode) {
+        modeHintText.text = getString(
+            if (mode == ControlMode.TILT) R.string.mode_hint_tilt else R.string.mode_hint_fingerprint
+        )
     }
 
     /** Reads Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES and checks for our service. */

@@ -3,9 +3,15 @@
     <string name="accessibility_service_label">Fingerprint Mouse Control</string>
     <string name="accessibility_service_description">Lets you move an on-screen pointer and tap by swiping on the fingerprint sensor, and draws the pointer as a small overlay icon.</string>
 
-    <string name="main_description">Turn on the switch below, then enable "Fingerprint Mouse Control" on the Accessibility Settings screen that opens. Once enabled, swipe up, down, left, or right on your fingerprint sensor to move the pointer. Swipe the same direction twice quickly to click.</string>
+    <string name="main_description">Turn on the switch below, then enable "Fingerprint Mouse Control" on the Accessibility Settings screen that opens. Pick a control mode below, then check the hint text under it for how to click in that mode.</string>
     <string name="switch_label">Enable fingerprint mouse control</string>
     <string name="status_enabled">Status: service is enabled</string>
     <string name="status_disabled">Status: service is not enabled</string>
     <string name="toast_find_service">Find \"Fingerprint Mouse Control\" in the list and turn it on</string>
+
+    <string name="control_mode_label">Control mode</string>
+    <string name="radio_fingerprint_label">Fingerprint swipe</string>
+    <string name="radio_tilt_label">Tilt (accelerometer)</string>
+    <string name="mode_hint_fingerprint">Swipe up, down, left, or right on your fingerprint sensor to move the pointer. Swipe the same direction twice quickly to click.</string>
+    <string name="mode_hint_tilt">Tilt your phone to move the pointer — it moves faster the more you tilt, and stops when the phone is level. Press Volume Up to click.</string>
 </resources>

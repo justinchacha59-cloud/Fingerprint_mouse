@@ -2,6 +2,9 @@
 <!--
     canPerformGestures="true"            -> required to call dispatchGesture() for the synthetic click.
     canRequestFingerprintGestures="true" -> required to receive FingerprintGestureController callbacks.
+    canRequestFilterKeyEvents="true"     -> required for onKeyEvent() to be invoked at all, so tilt mode
+                                             can intercept the Volume Up key as a "click" button and
+                                             suppress the normal volume-change behavior for it.
     canRetrieveWindowContent="false"     -> we never inspect screen content, only dispatch a tap,
                                              so we deliberately do NOT request this — least privilege.
     accessibilityEventTypes="typeWindowStateChanged" is the minimum non-empty event mask; we don't
@@ -13,6 +16,7 @@
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault"
     android:canPerformGestures="true"
+    android:canRequestFilterKeyEvents="true"
     android:canRequestFingerprintGestures="true"
     android:canRetrieveWindowContent="false"
     android:description="@string/accessibility_service_description"
