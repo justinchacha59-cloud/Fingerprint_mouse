@@ -13,6 +13,7 @@ import android.view.Gravity
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.ImageView
+import android.widget.TextView
 import kotlin.math.roundToInt
 
 /**
@@ -65,6 +66,15 @@ class FingerprintMouseService : AccessibilityService() {
     private lateinit var cursorView: ImageView
     private lateinit var cursorParams: WindowManager.LayoutParams
 
+    // Small always-on-screen readout so you can tell, just by looking at the
+    // phone, whether the sensor is reporting anything at all — no adb/logcat
+    // needed. Remove this overlay once gestures are confirmed working end to end.
+    private lateinit var debugView: TextView
+    private lateinit var debugParams: WindowManager.LayoutParams
+    private var detectionAvailable: Boolean? = null // null = not checked yet
+    private var receivedCount = 0
+    private var lastReceivedName = "none yet"
+
     private var screenWidthPx = 0
     private var screenHeightPx = 0
     private var cursorSizePx = 0
@@ -95,6 +105,8 @@ class FingerprintMouseService : AccessibilityService() {
             // This flips to false, for example, while the fingerprint sensor
             // is busy elsewhere (e.g. the lock screen is asking for auth).
             Log.i(TAG, "Fingerprint gesture detection available: $available")
+            detectionAvailable = available
+            updateDebugOverlay()
         }
     }
 
@@ -114,6 +126,7 @@ class FingerprintMouseService : AccessibilityService() {
         cursorY = screenHeightPx / 2
 
         addCursorOverlay()
+        addDebugOverlay()
         registerFingerprintGestures()
     }
 
@@ -136,6 +149,9 @@ class FingerprintMouseService : AccessibilityService() {
             // will fire if/when it becomes available.
             Log.w(TAG, "Fingerprint gesture detection is not available right now.")
         }
+
+        detectionAvailable = controller.isGestureDetectionAvailable
+        updateDebugOverlay()
 
         controller.registerFingerprintGestureCallback(fingerprintCallback, null)
     }
@@ -175,11 +191,73 @@ class FingerprintMouseService : AccessibilityService() {
     }
 
     /**
+     * Small status readout pinned near the top of the screen: shows whether
+     * the platform currently reports gesture detection as available, plus a
+     * live count/name of raw swipes received. This is the fastest way to
+     * tell apart three very different failure modes:
+     *   - count never increases           -> sensor isn't reporting swipes to
+     *                                         this app at all (often an OEM/
+     *                                         HAL limitation, see README)
+     *   - "available: false" persists     -> check enrolled fingerprints /
+     *                                         sensor is reserved elsewhere
+     *   - count increases, cursor doesn't -> a bug in the move/redraw logic
+     *                                         (not a sensor problem)
+     */
+    private fun addDebugOverlay() {
+        debugView = TextView(this).apply {
+            setBackgroundColor(0xAA000000.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 12f
+            setPadding(dpToPx(8f), dpToPx(4f), dpToPx(8f), dpToPx(4f))
+        }
+
+        debugParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = dpToPx(16f)
+            y = dpToPx(56f) // clears the status bar on most devices
+        }
+
+        windowManager.addView(debugView, debugParams)
+        updateDebugOverlay()
+    }
+
+    private fun updateDebugOverlay() {
+        if (!::debugView.isInitialized) return
+        val availabilityText = when (detectionAvailable) {
+            true -> "available"
+            false -> "NOT available"
+            null -> "checking…"
+        }
+        debugView.text = "FP gestures: $availabilityText\nreceived: $receivedCount  last: $lastReceivedName"
+    }
+
+    /** Human-readable name for a raw gesture constant, for the debug overlay. */
+    private fun gestureName(gesture: Int): String = when (gesture) {
+        FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_UP -> "UP"
+        FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_DOWN -> "DOWN"
+        FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_LEFT -> "LEFT"
+        FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_RIGHT -> "RIGHT"
+        else -> "unknown($gesture)"
+    }
+
+    /**
      * Core input handler. Every raw swipe either moves the cursor by one
      * step, or — if it repeats the previous direction quickly enough —
      * is reinterpreted as a click at the cursor's current position.
      */
     private fun handleGesture(gesture: Int) {
+        receivedCount++
+        lastReceivedName = gestureName(gesture)
+        updateDebugOverlay()
+
         val now = SystemClock.uptimeMillis()
         val isDoubleSwipe = gesture == lastGestureType &&
             (now - lastGestureAtMs) <= DOUBLE_SWIPE_WINDOW_MS
@@ -289,6 +367,9 @@ class FingerprintMouseService : AccessibilityService() {
         gestureController?.unregisterFingerprintGestureCallback(fingerprintCallback)
         if (::cursorView.isInitialized && cursorView.isAttachedToWindow) {
             windowManager.removeView(cursorView)
+        }
+        if (::debugView.isInitialized && debugView.isAttachedToWindow) {
+            windowManager.removeView(debugView)
         }
         return super.onUnbind(intent)
     }
