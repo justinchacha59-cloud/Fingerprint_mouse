@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">Fingerprint Mouse</string>
     <string name="accessibility_service_label">Fingerprint Mouse Control</string>
-    <string name="accessibility_service_description">Lets you move an on-screen pointer and tap by swiping on the fingerprint sensor, and draws the pointer as a small overlay icon.</string>
+    <string name="accessibility_service_description">Lets you move an on-screen pointer using fingerprint swipes or phone tilt, and click via double-swipe or a long Volume Up press. Draws the pointer as a small overlay icon.</string>
 
     <string name="main_description">Turn on the switch below, then enable "Fingerprint Mouse Control" on the Accessibility Settings screen that opens. Pick a control mode below, then check the hint text under it for how to click in that mode.</string>
     <string name="switch_label">Enable fingerprint mouse control</string>
@@ -11,7 +11,11 @@
 
     <string name="control_mode_label">Control mode</string>
     <string name="radio_fingerprint_label">Fingerprint swipe</string>
-    <string name="radio_tilt_label">Tilt (accelerometer)</string>
+    <string name="radio_tilt_label">Tilt (gyroscope-assisted)</string>
     <string name="mode_hint_fingerprint">Swipe up, down, left, or right on your fingerprint sensor to move the pointer. Swipe the same direction twice quickly to click.</string>
-    <string name="mode_hint_tilt">Tilt your phone to move the pointer — it moves faster the more you tilt, and stops when the phone is level. Press Volume Up to click.</string>
+    <string name="mode_hint_tilt">Tilt your phone to move the pointer — it moves faster the more you tilt, and stops when the phone is level. Hold Volume Up for about half a second and release to click (a quick press does nothing, so it won\'t collide with normal volume control).</string>
+
+    <string name="cursor_speed_label">Cursor speed</string>
+    <string name="speed_value_format">%1$.2fx</string>
+    <string name="speed_hint">Applies to both modes: how far the pointer moves per swipe (fingerprint) or per tilt update (tilt).</string>
 </resources>

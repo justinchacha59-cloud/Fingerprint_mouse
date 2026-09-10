@@ -19,57 +19,53 @@ import android.view.KeyEvent
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.ImageView
-import android.widget.TextView
 import kotlin.math.abs
+import kotlin.math.asin
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 /**
- * Turns the phone's capacitive fingerprint sensor into a laptop-style trackpad.
+ * Turns the phone into a laptop-style trackpad, using either of two input
+ * schemes the user picks on the main screen ([ControlMode]):
  *
- * Pipeline:
- *   1. FingerprintGestureController reports one of 4 raw directional swipes.
- *   2. We nudge an in-memory (cursorX, cursorY) coordinate and redraw a small
- *      overlay icon there via WindowManager, so the user has a visible pointer.
- *   3. A specific gesture pattern (see [handleGesture]) triggers a synthetic
- *      tap at the pointer's current coordinates via dispatchGesture().
+ *   FINGERPRINT — FingerprintGestureController reports one of four raw
+ *   directional swipes (UP/DOWN/LEFT/RIGHT — that's the entire platform API,
+ *   there is no "tap" event for the sensor). Swiping the same direction
+ *   twice within [DOUBLE_SWIPE_WINDOW_MS] is treated as a click, since a
+ *   deliberate double-flick is unlikely to happen by accident during normal
+ *   single-step movement. Some devices' fingerprint hardware never reports
+ *   these swipes to apps at all — a driver/OEM limitation this code can't
+ *   work around — which is what TILT mode exists as an alternative to.
  *
- * IMPORTANT PLATFORM CONSTRAINT — read before changing the "click" logic:
- * The public FingerprintGestureController API only ever reports FOUR gesture
- * constants: SWIPE_UP, SWIPE_DOWN, SWIPE_LEFT, SWIPE_RIGHT. There is no "tap"
- * or "press" event exposed for the fingerprint sensor — the OS does not give
- * accessibility services raw touch data from the sensor, only these four
- * pre-classified swipes. So a literal "double-tap to click" as described in
- * the spec isn't something the platform can report.
+ *   TILT — the device's fused orientation sensor (TYPE_ROTATION_VECTOR,
+ *   which is itself the platform combining the accelerometer, gyroscope, and
+ *   magnetometer into one stable reading) drives the cursor continuously,
+ *   like a joystick: tilt further, move faster; return to level, it stops.
+ *   Volume Up performs a click, via [onKeyEvent] — held for
+ *   [VOLUME_LONG_PRESS_MS] and released, rather than a quick press, so it
+ *   can't be mistaken for (or collide with) a normal volume adjustment.
  *
- * The practical stand-in implemented here: swiping the SAME direction twice
- * within [DOUBLE_SWIPE_WINDOW_MS] is treated as a "click" instead of a second
- * move, since a deliberate double-flick is very unlikely to happen by accident
- * during normal single-step cursor movement. This is a design choice, not a
- * platform API — see [handleGesture] to tune or replace it (e.g. you could
- * instead reserve one specific direction, like DOWN, purely as the click
- * trigger and use only UP/LEFT/RIGHT for movement).
+ * Either way the cursor is the same small overlay icon, redrawn at
+ * (cursorX, cursorY) via a TYPE_ACCESSIBILITY_OVERLAY window (no separate
+ * "draw over other apps" permission needed), and a click is dispatched as a
+ * short synthetic tap through dispatchGesture().
  *
- * SECOND CONTROL SCHEME — device tilt:
- * Some devices' fingerprint hardware never reports swipe gestures to apps at
- * all (a driver/OEM limitation, not something this code can work around —
- * see the debug overlay this service draws, and the README). For those
- * devices, [ControlMode.TILT] drives the same cursor using the accelerometer
- * instead: tilting the phone moves the pointer continuously, like a joystick,
- * and pressing Volume Up performs a click (via [onKeyEvent], intercepted so
- * it doesn't also change the media volume). [ControlModePrefs] holds which
- * mode is active; MainActivity writes it, this service reads it and reacts
- * live if it changes while the service is already running.
+ * [ControlModePrefs] holds the active mode and a user-adjustable speed
+ * multiplier (set on the main screen); this service reads both on connect
+ * and reacts live if either changes while it's already running.
  */
 class FingerprintMouseService : AccessibilityService() {
 
     companion object {
         private const val TAG = "FingerprintMouseSvc"
 
-        // How far the cursor moves per single swipe, in dp (density-independent).
-        private const val MOVE_STEP_DP = 48f
-
         // Visual size of the cursor icon, in dp.
         private const val CURSOR_SIZE_DP = 40f
+
+        // --- Fingerprint mode ---
+        // Base distance the cursor moves per single swipe, in dp, before the
+        // user's speed multiplier is applied.
+        private const val BASE_MOVE_STEP_DP = 48f
 
         // Two same-direction swipes inside this window = a "click", not two moves.
         private const val DOUBLE_SWIPE_WINDOW_MS = 350L
@@ -79,47 +75,49 @@ class FingerprintMouseService : AccessibilityService() {
         // rather than a long-press to whatever app receives it.
         private const val CLICK_STROKE_DURATION_MS = 40L
 
-        // --- Tilt mode tuning ---
-        // Raw accelerometer units are m/s^2; holding the phone flat and level
-        // reads close to (x=0, y=0) on these two axes (gravity sits almost
-        // entirely on Z then). Tilting introduces an x and/or y component.
-        private const val TILT_DEADZONE = 1.0f // ignore small jitter around level
-        private const val TILT_SENSITIVITY = 4f // px of movement per unit of tilt past the deadzone
-        private const val TILT_MAX_STEP_DP = 14f // clamp so a hard tilt can't fling the cursor in one tick
-        private const val TILT_UPDATE_INTERVAL_MS = 40L // ~25 cursor updates/sec while tilting
-        // Flip either of these if the cursor moves the opposite way from what
-        // feels natural on your device/grip — sign conventions for tilt vary
+        // --- Tilt mode ---
+        // Orientation angles from getOrientation() are in RADIANS, roughly
+        // -1.57 to 1.57 (-90deg to 90deg). A small deadzone filters natural
+        // hand jitter while still starting movement almost the instant you tilt.
+        private const val TILT_DEADZONE_RAD = 0.025f // ~1.4 degrees
+        // Base px of movement per tick, per (radian past deadzone), before
+        // the curve exponent and the user's speed multiplier are applied.
+        private const val TILT_BASE_SENSITIVITY = 260f
+        // >1 makes larger tilts ramp up faster than linear — small tilts
+        // still respond immediately, big tilts cover ground fast.
+        private const val TILT_CURVE_EXPONENT = 1.3f
+        // Per-tick clamp so a hard tilt can't fling the cursor across the
+        // screen in one update, even at high speed-multiplier settings.
+        private const val TILT_MAX_STEP_DP = 26f
+        // How often we apply a tilt reading to the cursor. The sensor itself
+        // may report faster than this; this just caps how often we redraw.
+        private const val TILT_UPDATE_INTERVAL_MS = 16L // ~60 updates/sec
+        // Flip either of these if the cursor moves opposite to what feels
+        // natural on your device/grip — sign conventions for tilt vary
         // enough between devices that this is meant to be tuned by hand.
         private const val TILT_INVERT_X = false
         private const val TILT_INVERT_Y = true
+
+        // Volume Up must be held this long (and then released) to register
+        // as a click in tilt mode — deliberately longer than a normal quick
+        // press, so it can't be confused with adjusting media volume.
+        private const val VOLUME_LONG_PRESS_MS = 450L
     }
 
     private lateinit var windowManager: WindowManager
     private lateinit var cursorView: ImageView
     private lateinit var cursorParams: WindowManager.LayoutParams
 
-    // Small always-on-screen readout so you can tell, just by looking at the
-    // phone, whether the sensor is reporting anything at all — no adb/logcat
-    // needed. Remove this overlay once gestures are confirmed working end to end.
-    private lateinit var debugView: TextView
-    private lateinit var debugParams: WindowManager.LayoutParams
-    private var detectionAvailable: Boolean? = null // null = not checked yet
-    private var receivedCount = 0
-    private var lastReceivedName = "none yet"
-
     private var screenWidthPx = 0
     private var screenHeightPx = 0
     private var cursorSizePx = 0
-    private var moveStepPx = 0
+    private var baseMoveStepPx = 0
     private var tiltMaxStepPx = 0
 
-    // Which input scheme is currently active. Read from ControlModePrefs on
-    // connect, then kept in sync live via prefsListener below.
+    // Which input scheme is active, and how fast movement is — both read
+    // from ControlModePrefs on connect, then kept in sync live via prefsListener.
     private var controlMode: ControlMode = ControlMode.FINGERPRINT
-
-    private var sensorManager: SensorManager? = null
-    private var accelerometer: Sensor? = null
-    private var lastTiltUpdateMs = 0L
+    private var speedMultiplier: Float = ControlModePrefs.DEFAULT_SPEED_MULTIPLIER
 
     // The cursor's logical position, in raw screen pixels, (0,0) = top-left.
     // This is the single source of truth; the overlay's LayoutParams are
@@ -137,37 +135,63 @@ class FingerprintMouseService : AccessibilityService() {
     // to avoid shadowing it — we cache its value here once the service connects.
     private var gestureController: FingerprintGestureController? = null
 
+    // --- Tilt sensor state ---
+    private var sensorManager: SensorManager? = null
+    private var orientationSensor: Sensor? = null
+    private var usingRotationVector = false
+    private val rotationMatrix = FloatArray(9)
+    private val orientationAngles = FloatArray(3)
+    private var lastTiltUpdateMs = 0L
+
+    // --- Volume-Up long-press tracking (tilt mode's click button) ---
+    private var volumeDownAtMs = 0L
+
     private val fingerprintCallback = object : FingerprintGestureCallback() {
         override fun onGestureDetected(gesture: Int) {
             handleGesture(gesture)
         }
 
         override fun onGestureDetectionAvailabilityChanged(available: Boolean) {
-            // This flips to false, for example, while the fingerprint sensor
-            // is busy elsewhere (e.g. the lock screen is asking for auth).
+            // Common causes for `false`: no fingerprint hardware, no enrolled
+            // fingerprints, or the sensor is reserved for a system auth prompt.
             Log.i(TAG, "Fingerprint gesture detection available: $available")
-            detectionAvailable = available
-            updateDebugOverlay()
         }
     }
 
-    /** Picks up a mode switch made from MainActivity while this service is already running. */
+    /** Picks up a mode/speed change made from MainActivity while this service is already running. */
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key == ControlModePrefs.KEY) {
-            controlMode = ControlModePrefs.getMode(this)
-            updateDebugOverlay()
+        when (key) {
+            ControlModePrefs.MODE_KEY -> controlMode = ControlModePrefs.getMode(this)
+            ControlModePrefs.SPEED_KEY -> speedMultiplier = ControlModePrefs.getSpeedMultiplier(this)
         }
     }
 
     private val tiltListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             if (controlMode != ControlMode.TILT) return
-            handleTilt(event.values[0], event.values[1])
+
+            if (usingRotationVector) {
+                // getRotationMatrixFromVector + getOrientation turn the fused
+                // rotation vector (accelerometer + gyroscope + magnetometer)
+                // into [azimuth, pitch, roll] in radians. pitch = forward/back
+                // tilt, roll = left/right tilt — that pairing is what we want
+                // for an X/Y cursor.
+                SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+                SensorManager.getOrientation(rotationMatrix, orientationAngles)
+                handleTilt(rollRad = orientationAngles[2], pitchRad = orientationAngles[1])
+            } else {
+                // Fallback path (no rotation-vector sensor on this device):
+                // approximate an angle from raw accelerometer m/s^2 so the
+                // same radian-based tuning constants still apply sensibly.
+                val rollRad = asin((event.values[0] / SensorManager.GRAVITY_EARTH).coerceIn(-1f, 1f))
+                val pitchRad = asin((event.values[1] / SensorManager.GRAVITY_EARTH).coerceIn(-1f, 1f))
+                handleTilt(rollRad, pitchRad)
+            }
         }
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-            // Not used — tilt is treated as relative movement, not an
-            // absolute measurement, so sensor accuracy changes don't matter here.
+            // Not used — tilt is relative movement, not an absolute
+            // measurement, so sensor accuracy changes don't matter here.
         }
     }
 
@@ -180,7 +204,7 @@ class FingerprintMouseService : AccessibilityService() {
         screenWidthPx = metrics.widthPixels
         screenHeightPx = metrics.heightPixels
         cursorSizePx = dpToPx(CURSOR_SIZE_DP)
-        moveStepPx = dpToPx(MOVE_STEP_DP)
+        baseMoveStepPx = dpToPx(BASE_MOVE_STEP_DP)
         tiltMaxStepPx = dpToPx(TILT_MAX_STEP_DP)
 
         // Start the pointer in the middle of the screen.
@@ -188,33 +212,12 @@ class FingerprintMouseService : AccessibilityService() {
         cursorY = screenHeightPx / 2
 
         controlMode = ControlModePrefs.getMode(this)
+        speedMultiplier = ControlModePrefs.getSpeedMultiplier(this)
         ControlModePrefs.registerListener(this, prefsListener)
 
         addCursorOverlay()
-        addDebugOverlay()
         registerFingerprintGestures()
         registerTiltSensor()
-    }
-
-    /**
-     * Registers the accelerometer listener used by [ControlMode.TILT].
-     * We register it unconditionally (rather than only while tilt mode is
-     * selected) so switching modes at runtime is instant — [tiltListener]
-     * itself checks [controlMode] before acting on each reading, so this
-     * costs a little battery while in fingerprint mode but keeps the
-     * mode-switch logic simple and immediate.
-     */
-    private fun registerTiltSensor() {
-        val sm = getSystemService(SENSOR_SERVICE) as? SensorManager
-        sensorManager = sm
-        accelerometer = sm?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-
-        if (accelerometer == null) {
-            Log.w(TAG, "No accelerometer on this device; tilt mode will not function.")
-            return
-        }
-
-        sm?.registerListener(tiltListener, accelerometer, SensorManager.SENSOR_DELAY_GAME)
     }
 
     /** Registers for swipe callbacks, guarded by a hardware/state availability check. */
@@ -230,17 +233,48 @@ class FingerprintMouseService : AccessibilityService() {
         }
 
         if (!controller.isGestureDetectionAvailable) {
-            // Common causes: no fingerprint hardware, no enrolled fingerprints,
-            // or the sensor is currently reserved for a system auth prompt.
-            // We still register below — onGestureDetectionAvailabilityChanged
-            // will fire if/when it becomes available.
             Log.w(TAG, "Fingerprint gesture detection is not available right now.")
         }
 
-        detectionAvailable = controller.isGestureDetectionAvailable
-        updateDebugOverlay()
-
         controller.registerFingerprintGestureCallback(fingerprintCallback, null)
+    }
+
+    /**
+     * Registers the tilt sensor used by [ControlMode.TILT]. Prefers
+     * TYPE_ROTATION_VECTOR — the platform's own fusion of accelerometer +
+     * gyroscope + magnetometer into one stable orientation reading, which is
+     * far more accurate and jitter-free than using the raw accelerometer
+     * alone. Falls back to the raw accelerometer only if a device genuinely
+     * lacks a rotation-vector sensor (rare on anything from the last decade).
+     *
+     * Registered unconditionally (not only while tilt mode is selected) so
+     * switching modes at runtime is instant — tiltListener itself checks
+     * controlMode before acting on each reading.
+     */
+    private fun registerTiltSensor() {
+        val sm = getSystemService(SENSOR_SERVICE) as? SensorManager
+        sensorManager = sm
+
+        val rotationVector = sm?.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        if (rotationVector != null) {
+            orientationSensor = rotationVector
+            usingRotationVector = true
+        } else {
+            Log.w(TAG, "No rotation vector sensor; falling back to raw accelerometer for tilt.")
+            orientationSensor = sm?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            usingRotationVector = false
+        }
+
+        if (orientationSensor == null) {
+            Log.w(TAG, "No usable tilt sensor on this device; tilt mode will not function.")
+            return
+        }
+
+        // FASTEST rather than GAME: tilt mode is explicitly meant to feel
+        // immediate, and TILT_UPDATE_INTERVAL_MS below already caps how
+        // often we actually redraw, so this just avoids adding the delay
+        // that GAME/UI/NORMAL each intentionally introduce.
+        sm?.registerListener(tiltListener, orientationSensor, SensorManager.SENSOR_DELAY_FASTEST)
     }
 
     /**
@@ -278,75 +312,11 @@ class FingerprintMouseService : AccessibilityService() {
     }
 
     /**
-     * Small status readout pinned near the top of the screen: shows whether
-     * the platform currently reports gesture detection as available, plus a
-     * live count/name of raw swipes received. This is the fastest way to
-     * tell apart three very different failure modes:
-     *   - count never increases           -> sensor isn't reporting swipes to
-     *                                         this app at all (often an OEM/
-     *                                         HAL limitation, see README)
-     *   - "available: false" persists     -> check enrolled fingerprints /
-     *                                         sensor is reserved elsewhere
-     *   - count increases, cursor doesn't -> a bug in the move/redraw logic
-     *                                         (not a sensor problem)
-     */
-    private fun addDebugOverlay() {
-        debugView = TextView(this).apply {
-            setBackgroundColor(0xAA000000.toInt())
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = 12f
-            setPadding(dpToPx(8f), dpToPx(4f), dpToPx(8f), dpToPx(4f))
-        }
-
-        debugParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = dpToPx(16f)
-            y = dpToPx(56f) // clears the status bar on most devices
-        }
-
-        windowManager.addView(debugView, debugParams)
-        updateDebugOverlay()
-    }
-
-    private fun updateDebugOverlay() {
-        if (!::debugView.isInitialized) return
-        val availabilityText = when (detectionAvailable) {
-            true -> "available"
-            false -> "NOT available"
-            null -> "checking…"
-        }
-        debugView.text = "Mode: ${controlMode.name}\nFP gestures: $availabilityText\nreceived: $receivedCount  last: $lastReceivedName"
-    }
-
-    /** Human-readable name for a raw gesture constant, for the debug overlay. */
-    private fun gestureName(gesture: Int): String = when (gesture) {
-        FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_UP -> "UP"
-        FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_DOWN -> "DOWN"
-        FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_LEFT -> "LEFT"
-        FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_RIGHT -> "RIGHT"
-        else -> "unknown($gesture)"
-    }
-
-    /**
-     * Core input handler. Every raw swipe either moves the cursor by one
-     * step, or — if it repeats the previous direction quickly enough —
-     * is reinterpreted as a click at the cursor's current position.
+     * Core input handler for fingerprint swipes. Every raw swipe either
+     * moves the cursor by one step, or — if it repeats the previous
+     * direction quickly enough — is reinterpreted as a click.
      */
     private fun handleGesture(gesture: Int) {
-        receivedCount++
-        lastReceivedName = gestureName(gesture)
-        updateDebugOverlay()
-
-        // Still counted above (useful for diagnosing sensor issues even
-        // while tilt mode is selected), but only acted on in fingerprint mode.
         if (controlMode != ControlMode.FINGERPRINT) return
 
         val now = SystemClock.uptimeMillis()
@@ -365,56 +335,54 @@ class FingerprintMouseService : AccessibilityService() {
         lastGestureType = gesture
         lastGestureAtMs = now
 
+        val stepPx = (baseMoveStepPx * speedMultiplier).roundToInt()
+
         when (gesture) {
-            FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_UP -> cursorY -= moveStepPx
-            FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_DOWN -> cursorY += moveStepPx
-            FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_LEFT -> cursorX -= moveStepPx
-            FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_RIGHT -> cursorX += moveStepPx
+            FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_UP -> cursorY -= stepPx
+            FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_DOWN -> cursorY += stepPx
+            FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_LEFT -> cursorX -= stepPx
+            FingerprintGestureController.FINGERPRINT_GESTURE_SWIPE_RIGHT -> cursorX += stepPx
             else -> {
                 Log.w(TAG, "Unhandled fingerprint gesture constant: $gesture")
                 return
             }
         }
 
-        // Clamp so the cursor can't be nudged off the visible display.
         cursorX = cursorX.coerceIn(0, screenWidthPx)
         cursorY = cursorY.coerceIn(0, screenHeightPx)
-
         updateCursorPosition()
     }
 
     /**
      * Continuous counterpart to [handleGesture] for [ControlMode.TILT].
-     * Unlike a fingerprint swipe (a single discrete event), the accelerometer
-     * fires constantly — SENSOR_DELAY_GAME is roughly every 20ms — so this
-     * is throttled to [TILT_UPDATE_INTERVAL_MS] and treats "how far past
-     * level" as a velocity rather than a one-shot step: hold the phone
-     * tilted and the cursor keeps moving; return it to level and it stops.
-     *
-     * rawX/rawY are SensorEvent.values[0] and [1] — raw accelerometer units
-     * (m/s^2), NOT screen pixels. They only become a pixel delta below, via
-     * TILT_SENSITIVITY.
+     * Treats "how far past level, in radians" as a velocity rather than a
+     * one-shot step: hold the phone tilted and the cursor keeps moving;
+     * return it to level and it stops. TILT_CURVE_EXPONENT > 1 means small
+     * tilts already produce visible, immediate movement, while larger tilts
+     * ramp up faster than linear rather than scaling 1:1.
      */
-    private fun handleTilt(rawX: Float, rawY: Float) {
+    private fun handleTilt(rollRad: Float, pitchRad: Float) {
         val now = SystemClock.uptimeMillis()
         if (now - lastTiltUpdateMs < TILT_UPDATE_INTERVAL_MS) return
         lastTiltUpdateMs = now
 
-        val x = if (TILT_INVERT_X) -rawX else rawX
-        val y = if (TILT_INVERT_Y) -rawY else rawY
+        val x = if (TILT_INVERT_X) -rollRad else rollRad
+        val y = if (TILT_INVERT_Y) -pitchRad else pitchRad
 
         var moved = false
 
-        if (abs(x) > TILT_DEADZONE) {
-            val delta = ((abs(x) - TILT_DEADZONE) * TILT_SENSITIVITY)
+        if (abs(x) > TILT_DEADZONE_RAD) {
+            val past = abs(x) - TILT_DEADZONE_RAD
+            val delta = (past.pow(TILT_CURVE_EXPONENT) * TILT_BASE_SENSITIVITY * speedMultiplier)
                 .coerceAtMost(tiltMaxStepPx.toFloat())
                 .roundToInt()
             cursorX += if (x > 0) delta else -delta
             moved = true
         }
 
-        if (abs(y) > TILT_DEADZONE) {
-            val delta = ((abs(y) - TILT_DEADZONE) * TILT_SENSITIVITY)
+        if (abs(y) > TILT_DEADZONE_RAD) {
+            val past = abs(y) - TILT_DEADZONE_RAD
+            val delta = (past.pow(TILT_CURVE_EXPONENT) * TILT_BASE_SENSITIVITY * speedMultiplier)
                 .coerceAtMost(tiltMaxStepPx.toFloat())
                 .roundToInt()
             cursorY += if (y > 0) delta else -delta
@@ -492,7 +460,8 @@ class FingerprintMouseService : AccessibilityService() {
 
     // We don't need general accessibility events (window content, clicks
     // elsewhere, etc.) for this app — all of our input comes through the
-    // fingerprint gesture callback instead. Required override, intentionally empty.
+    // fingerprint gesture callback and the tilt sensor instead. Required
+    // override, intentionally empty.
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
     override fun onInterrupt() {
@@ -501,21 +470,36 @@ class FingerprintMouseService : AccessibilityService() {
 
     /**
      * Only invoked at all because canRequestFilterKeyEvents="true" is set in
-     * accessibility_service_config.xml. In [ControlMode.TILT], Volume Up
-     * doubles as the click button: we perform the click on ACTION_DOWN and
-     * return true for both DOWN and UP so the system's volume UI never
-     * appears and the actual media volume never changes. In fingerprint
-     * mode we return false for everything, so volume keys behave normally —
-     * the click gesture there is the double-swipe instead (see [handleGesture]).
+     * accessibility_service_config.xml. In [ControlMode.TILT], holding
+     * Volume Up for [VOLUME_LONG_PRESS_MS] and releasing it performs a click
+     * — deliberately a long-press rather than a quick tap, so it can't be
+     * confused with (or accidentally trigger) a normal volume change. We
+     * consume the key entirely while in tilt mode, on both press and
+     * release, so the system volume UI never appears and the media volume
+     * never actually changes. In fingerprint mode we return false for
+     * everything, so the volume keys behave completely normally — that
+     * mode's click gesture is the double-swipe instead (see [handleGesture]).
      */
     override fun onKeyEvent(event: KeyEvent): Boolean {
-        if (controlMode == ControlMode.TILT && event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-            if (event.action == KeyEvent.ACTION_DOWN) {
-                performClickAtCursor()
-            }
-            return true
+        if (controlMode != ControlMode.TILT || event.keyCode != KeyEvent.KEYCODE_VOLUME_UP) {
+            return false
         }
-        return false
+
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    volumeDownAtMs = SystemClock.uptimeMillis()
+                }
+            }
+            KeyEvent.ACTION_UP -> {
+                val heldMs = SystemClock.uptimeMillis() - volumeDownAtMs
+                if (heldMs >= VOLUME_LONG_PRESS_MS) {
+                    performClickAtCursor()
+                }
+            }
+        }
+
+        return true
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
@@ -524,9 +508,6 @@ class FingerprintMouseService : AccessibilityService() {
         ControlModePrefs.unregisterListener(this, prefsListener)
         if (::cursorView.isInitialized && cursorView.isAttachedToWindow) {
             windowManager.removeView(cursorView)
-        }
-        if (::debugView.isInitialized && debugView.isAttachedToWindow) {
-            windowManager.removeView(debugView)
         }
         return super.onUnbind(intent)
     }
